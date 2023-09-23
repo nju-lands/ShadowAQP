@@ -1,0 +1,33 @@
+{
+  "name": "tpch-20g-supplier",
+  "data": "/home/lihan/train_dataset/tpch_20g/supplier.csv",
+  "categorical_columns": [
+    "s_nationkey"
+  ],
+  "numeric_columns": [
+    "s_acctbal"
+  ],
+  "label_columns": [
+    "s_nationkey"
+  ],
+  "bucket_columns": [],
+  "categorical_encoding": "binary",
+  "numeric_encoding": "gaussian",
+  "max_clusters": 5,
+  "model_type": "torch_cvae",
+  "lr": 0.001,
+  "optimizer_type": "adam",
+  "loss_agg_type": "mean",
+  "gpu_num": 0,
+  "epochs": 100,
+  "batch_size": 128,
+  "latent_dim": 50,
+  "intermediate_dim": 50,
+  "train_flag": "load",
+  "operation": "aqp", 
+  "sample_rate": 0.1,
+  "sample_for_train": 1,
+  "sample_method": "house",
+  "header": 1,
+  "delimiter": ","
+}
