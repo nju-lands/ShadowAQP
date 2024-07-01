@@ -27,6 +27,7 @@ class TabularDataset(Dataset):
         self.numeric_encoding = param['numeric_encoding']
         self.sample_for_train = param['sample_for_train']
         self.load_data(param)
+        self.delete_data = False
         encoded_categorical = None
         encoded_numeric = None
         start_time = time.perf_counter()
@@ -63,7 +64,228 @@ class TabularDataset(Dataset):
             self.data = pd.concat([encoded_numeric.reset_index(drop=True), encoded_categorical.reset_index(drop=True)],
                                   axis=1)
 
-        if self.label_column_name is not None:
+        if 'multi_label' in param and param['multi_label'] == 'true':       # 使用扩展的针对两个标签属性的分配算法
+            label_columns_copy = param['label_columns'].copy()
+            self.label_column_name_A = label_columns_copy[0]
+            self.label_column_name_B = label_columns_copy[1]
+            self.label_df[self.label_column_name_A] = self.label_df[self.label_column_name_A].astype(str)
+            self.label_df[self.label_column_name_B] = self.label_df[self.label_column_name_B].astype(str)
+
+            # 记录根据 A 属性进行分组的统计信息，TODO 实际上好像只要count和mean，后面可以精简下
+            self.label_group_stds_A = {}
+            self.label_group_means_A = {}
+            self.label_group_relative_stds_A = {}
+            self.label_group_relative_stds_sums_A = {}
+            self.label_group_counts_A = self.label_df[self.label_column_name_A].value_counts().to_dict()
+            
+            # 记录根据 B 属性进行分组的统计信息
+            self.label_group_stds_B = {}
+            self.label_group_means_B = {}
+            self.label_group_relative_stds_B = {}
+            self.label_group_relative_stds_sums_B = {}
+            self.label_group_counts_B = self.label_df[self.label_column_name_B].value_counts().to_dict()
+
+            # 记录根据 C 属性进行分组的统计信息
+            self.label_group_stds = {}
+            self.label_group_means = {}
+            self.label_group_relative_stds = {}
+            self.label_group_relative_stds_sums = {}
+
+            # 用于保存 C 到 A、B 的映射，对应公式中的 f1(c) 和 f2(c)
+            self.map_C_to_A = {}
+            self.map_C_to_B = {}
+            for ccc in self.label_df[self.label_column_name].unique().tolist():
+            # for ccc in self.label_group_stds[str(self.numeric_columns[0])]:      # 好像这样也能遍历 key
+                self.map_C_to_A[ccc] = ccc.split('-')[0]
+                self.map_C_to_B[ccc] = ccc.split('-')[1]
+
+            self.multi_label_group_beta = {}
+            self.multi_label_group_beta_sums = {}
+
+            for col in self.numeric_columns:
+                # 计算根据 A 属性进行分组的统计信息
+                self.label_group_stds_A[col] = self.label_df.groupby(self.label_column_name_A)[col].std(ddof=0).to_dict()
+                self.label_group_means_A[col] = self.label_df.groupby(self.label_column_name_A)[col].mean().to_dict()
+                self.label_group_relative_stds_A[col] = { k: self.label_group_stds_A[col][k] / self.label_group_means_A[col][k] 
+                    if self.label_group_means_A[col][k] != 0 else 0 for k in self.label_group_stds_A[col]}
+                self.label_group_relative_stds_sums_A[col] = sum(self.label_group_relative_stds_A[col].values())
+
+                # 计算根据 B 属性进行分组的统计信息
+                self.label_group_stds_B[col] = self.label_df.groupby(self.label_column_name_B)[col].std(ddof=0).to_dict()
+                self.label_group_means_B[col] = self.label_df.groupby(self.label_column_name_B)[col].mean().to_dict()
+                self.label_group_relative_stds_B[col] = { k: self.label_group_stds_B[col][k] / self.label_group_means_B[col][k] 
+                    if self.label_group_means_B[col][k] != 0 else 0 for k in self.label_group_stds_B[col]}
+                self.label_group_relative_stds_sums_B[col] = sum(self.label_group_relative_stds_B[col].values())
+
+                # 计算根据 C 属性进行分组的统计信息
+                self.label_group_stds[col] = self.label_df.groupby(self.label_column_name)[col].std(ddof=0).to_dict()
+                self.label_group_means[col] = self.label_df.groupby(self.label_column_name)[col].mean().to_dict()
+                self.label_group_relative_stds[col] = { k: self.label_group_stds[col][k] / self.label_group_means[col][k] 
+                    if self.label_group_means[col][k] != 0 else 0 for k in self.label_group_stds[col]}
+                self.label_group_relative_stds_sums[col] = sum(self.label_group_relative_stds[col].values())
+
+                self.multi_label_group_beta[col] = { k: self.label_group_counts[k] * self.label_group_stds[col][k] * 
+                    math.sqrt(1 / (self.label_group_counts_A[self.map_C_to_A[k]]**2 * self.label_group_means_A[col][self.map_C_to_A[k]]**2) + 
+                              1 / (self.label_group_counts_B[self.map_C_to_B[k]]**2 * self.label_group_means_B[col][self.map_C_to_B[k]]**2)) 
+                    for k in self.label_group_stds[col]}
+                self.multi_label_group_beta_sums[col] = sum(self.multi_label_group_beta[col].values())
+            self.label_size = self.label.shape[1]
+            
+            # # 用于保存 C 到 A、B 的映射，对应公式中的 f1(c) 和 f2(c)
+            # self.map_C_to_A = {}
+            # self.map_C_to_B = {}
+            # # for ccc in self.label_df[self.label_column_name].unique().tolist():
+            # for ccc in self.label_group_stds[self.numeric_columns[0]]:      # 好像这样也能遍历 key
+            #     self.map_C_to_A[ccc] = ccc.split('-')[0]
+            #     self.map_C_to_B[ccc] = ccc.split('-')[1]
+
+            # self.multi_label_group_beta = {}
+            # self.multi_label_group_beta_sums = {}
+            # for col in self.numeric_columns:
+            #     self.multi_label_group_beta[col] = { k: self.label_group_counts[col][k] * self.label_group_stds[col][k] * 
+            #         math.sqrt(1 / (self.label_group_counts_A[self.map_C_to_A[k]]**2 * self.label_group_means_A[self.map_C_to_A[k]]**2) + 
+            #                   1 / (self.label_group_counts_B[self.map_C_to_B[k]]**2 * self.label_group_means_B[self.map_C_to_B[k]]**2))
+            #         for k in self.label_group_stds[col]}
+            #     self.multi_label_group_beta_sums[col] = sum(self.multi_label_group_beta[col].values())
+        elif 'used_label' in param:       # 使用扩展的针对模型数量优化的分配算法，暂时只考虑两个属性 or 四个属性（针对两个实验）
+            label_columns_copy = param['label_columns'].copy()
+            if len(label_columns_copy) == 4:        # 四个属性，tpcds_whole实验
+                # A, B, C, D 依次为 ss_sold_date_sk, ss_item_sk, ss_customer_sk, ss_store_sk
+                self.label_column_name_A = label_columns_copy[0]
+                self.label_column_name_B = label_columns_copy[1]
+                self.label_column_name_C = label_columns_copy[2]
+                self.label_column_name_D = label_columns_copy[3]
+                self.label_df[self.label_column_name_A] = self.label_df[self.label_column_name_A].astype(str)
+                self.label_df[self.label_column_name_B] = self.label_df[self.label_column_name_B].astype(str)
+                self.label_df[self.label_column_name_C] = self.label_df[self.label_column_name_C].astype(str)
+                self.label_df[self.label_column_name_D] = self.label_df[self.label_column_name_D].astype(str)
+
+                # 记录根据 A 属性进行分组的统计信息，TODO 实际上好像只要count和mean，后面可以精简下
+                self.label_group_stds_A = {}
+                self.label_group_means_A = {}
+                self.label_group_relative_stds_A = {}
+                self.label_group_relative_stds_sums_A = {}
+                self.label_group_counts_A = self.label_df[self.label_column_name_A].value_counts().to_dict()
+                
+                # 记录根据 B 属性进行分组的统计信息
+                self.label_group_stds_B = {}
+                self.label_group_means_B = {}
+                self.label_group_relative_stds_B = {}
+                self.label_group_relative_stds_sums_B = {}
+                self.label_group_counts_B = self.label_df[self.label_column_name_B].value_counts().to_dict()
+
+                # 记录根据 C 属性进行分组的统计信息
+                self.label_group_stds_C = {}
+                self.label_group_means_C = {}
+                self.label_group_relative_stds_C = {}
+                self.label_group_relative_stds_sums_C = {}
+                self.label_group_counts_C = self.label_df[self.label_column_name_C].value_counts().to_dict()
+                
+                # 记录根据 D 属性进行分组的统计信息
+                self.label_group_stds_D = {}
+                self.label_group_means_D = {}
+                self.label_group_relative_stds_D = {}
+                self.label_group_relative_stds_sums_D = {}
+                self.label_group_counts_D = self.label_df[self.label_column_name_D].value_counts().to_dict()
+
+                # 记录根据 E 属性进行分组的统计信息 (A-D, 即 ss_sold_date_sk-ss_store_sk)
+                self.label_group_stds = {}
+                self.label_group_means = {}
+                self.label_group_relative_stds = {}
+                self.label_group_relative_stds_sums = {}
+
+                self.label_column_name_E = "-".join([label_columns_copy[0], label_columns_copy[3]])
+                self.label_df[self.label_column_name_E] = self.label_df[[label_columns_copy[0], label_columns_copy[3]]].astype(str).agg('-'.join, axis=1)
+                self.label_group_counts_E = self.label_df[self.label_column_name_E].value_counts().to_dict()
+
+                for col in self.numeric_columns:
+                    # 计算根据 A 属性进行分组的统计信息
+                    self.label_group_stds_A[col] = self.label_df.groupby(self.label_column_name_A)[col].std(ddof=0).to_dict()
+                    self.label_group_means_A[col] = self.label_df.groupby(self.label_column_name_A)[col].mean().to_dict()
+                    self.label_group_relative_stds_A[col] = { k: self.label_group_stds_A[col][k] / self.label_group_means_A[col][k] 
+                        if self.label_group_means_A[col][k] != 0 else 0 for k in self.label_group_stds_A[col]}
+                    self.label_group_relative_stds_sums_A[col] = sum(self.label_group_relative_stds_A[col].values())
+
+                    # 计算根据 B 属性进行分组的统计信息
+                    self.label_group_stds_B[col] = self.label_df.groupby(self.label_column_name_B)[col].std(ddof=0).to_dict()
+                    self.label_group_means_B[col] = self.label_df.groupby(self.label_column_name_B)[col].mean().to_dict()
+                    self.label_group_relative_stds_B[col] = { k: self.label_group_stds_B[col][k] / self.label_group_means_B[col][k] 
+                        if self.label_group_means_B[col][k] != 0 else 0 for k in self.label_group_stds_B[col]}
+                    self.label_group_relative_stds_sums_B[col] = sum(self.label_group_relative_stds_B[col].values())
+
+                    # 计算根据 C 属性进行分组的统计信息
+                    self.label_group_stds_C[col] = self.label_df.groupby(self.label_column_name_C)[col].std(ddof=0).to_dict()
+                    self.label_group_means_C[col] = self.label_df.groupby(self.label_column_name_C)[col].mean().to_dict()
+                    self.label_group_relative_stds_C[col] = { k: self.label_group_stds_C[col][k] / self.label_group_means_C[col][k] 
+                        if self.label_group_means_C[col][k] != 0 else 0 for k in self.label_group_stds_C[col]}
+                    self.label_group_relative_stds_sums_C[col] = sum(self.label_group_relative_stds_C[col].values())
+
+                    # 计算根据 D 属性进行分组的统计信息
+                    self.label_group_stds_D[col] = self.label_df.groupby(self.label_column_name_D)[col].std(ddof=0).to_dict()
+                    self.label_group_means_D[col] = self.label_df.groupby(self.label_column_name_D)[col].mean().to_dict()
+                    self.label_group_relative_stds_D[col] = { k: self.label_group_stds_D[col][k] / self.label_group_means_D[col][k] 
+                        if self.label_group_means_D[col][k] != 0 else 0 for k in self.label_group_stds_D[col]}
+                    self.label_group_relative_stds_sums_D[col] = sum(self.label_group_relative_stds_D[col].values())
+
+                    # 计算根据 E(A-D) 属性进行分组的统计信息
+                    self.label_group_stds[col] = self.label_df.groupby(self.label_column_name_E)[col].std(ddof=0).to_dict()
+                    self.label_group_means[col] = self.label_df.groupby(self.label_column_name_E)[col].mean().to_dict()
+                    self.label_group_relative_stds[col] = { k: self.label_group_stds[col][k] / self.label_group_means[col][k] 
+                        if self.label_group_means[col][k] != 0 else 0 for k in self.label_group_stds[col]}
+                    self.label_group_relative_stds_sums[col] = sum(self.label_group_relative_stds[col].values())
+
+                self.label_size = self.label.shape[1]
+            else:
+                self.label_column_name_A = label_columns_copy[0]
+                self.label_column_name_B = label_columns_copy[1]
+                self.label_df[self.label_column_name_A] = self.label_df[self.label_column_name_A].astype(str)
+                self.label_df[self.label_column_name_B] = self.label_df[self.label_column_name_B].astype(str)
+
+                # 记录根据 A 属性进行分组的统计信息，TODO 实际上好像只要count和mean，后面可以精简下
+                self.label_group_stds_A = {}
+                self.label_group_means_A = {}
+                self.label_group_relative_stds_A = {}
+                self.label_group_relative_stds_sums_A = {}
+                self.label_group_counts_A = self.label_df[self.label_column_name_A].value_counts().to_dict()
+                
+                # 记录根据 B 属性进行分组的统计信息
+                self.label_group_stds_B = {}
+                self.label_group_means_B = {}
+                self.label_group_relative_stds_B = {}
+                self.label_group_relative_stds_sums_B = {}
+                self.label_group_counts_B = self.label_df[self.label_column_name_B].value_counts().to_dict()
+
+                # 记录根据 C 属性进行分组的统计信息
+                self.label_group_stds = {}
+                self.label_group_means = {}
+                self.label_group_relative_stds = {}
+                self.label_group_relative_stds_sums = {}
+
+                for col in self.numeric_columns:
+                    # 计算根据 A 属性进行分组的统计信息
+                    self.label_group_stds_A[col] = self.label_df.groupby(self.label_column_name_A)[col].std(ddof=0).to_dict()
+                    self.label_group_means_A[col] = self.label_df.groupby(self.label_column_name_A)[col].mean().to_dict()
+                    self.label_group_relative_stds_A[col] = { k: self.label_group_stds_A[col][k] / self.label_group_means_A[col][k] 
+                        if self.label_group_means_A[col][k] != 0 else 0 for k in self.label_group_stds_A[col]}
+                    self.label_group_relative_stds_sums_A[col] = sum(self.label_group_relative_stds_A[col].values())
+
+                    # 计算根据 B 属性进行分组的统计信息
+                    self.label_group_stds_B[col] = self.label_df.groupby(self.label_column_name_B)[col].std(ddof=0).to_dict()
+                    self.label_group_means_B[col] = self.label_df.groupby(self.label_column_name_B)[col].mean().to_dict()
+                    self.label_group_relative_stds_B[col] = { k: self.label_group_stds_B[col][k] / self.label_group_means_B[col][k] 
+                        if self.label_group_means_B[col][k] != 0 else 0 for k in self.label_group_stds_B[col]}
+                    self.label_group_relative_stds_sums_B[col] = sum(self.label_group_relative_stds_B[col].values())
+
+                    # 计算根据 C 属性进行分组的统计信息
+                    self.label_group_stds[col] = self.label_df.groupby(self.label_column_name)[col].std(ddof=0).to_dict()
+                    self.label_group_means[col] = self.label_df.groupby(self.label_column_name)[col].mean().to_dict()
+                    self.label_group_relative_stds[col] = { k: self.label_group_stds[col][k] / self.label_group_means[col][k] 
+                        if self.label_group_means[col][k] != 0 else 0 for k in self.label_group_stds[col]}
+                    self.label_group_relative_stds_sums[col] = sum(self.label_group_relative_stds[col].values())
+
+                self.label_size = self.label.shape[1]
+
+        elif self.label_column_name is not None:
             # collect variance and mean of each numeric columns for each label group
             self.label_group_stds = {}
             self.label_group_means = {}
@@ -75,6 +297,9 @@ class TabularDataset(Dataset):
                 self.label_group_stds[col] = self.label_df.groupby(self.label_column_name)[col].std(ddof=0).to_dict()
                 self.label_group_means[col] = self.label_df.groupby(self.label_column_name)[col].mean().to_dict()
 
+                # print("==========self.label_column_name: ",self.label_column_name)
+                # print("==========self.label_group_stds[col].size: ", len(self.label_group_stds[col]))
+                # print("==========self.label_group_means[col].size: ", len(self.label_group_means[col]))
                 # print("==========self.label_group_stds: ",self.label_group_stds)
                 # print("==========self.label_group_means: ",self.label_group_means)
                 # print("==========self.origin_df.isnull().sum(): ",self.origin_df.isnull().sum())
@@ -168,6 +393,10 @@ class TabularDataset(Dataset):
         else:
             df = pd.read_csv(filename, header=None, delimiter=delimiter)
 
+        self.delete_data = False       # 判断是否是删除数据
+        if "left_data" in train_config:
+            self.delete_data = True
+
         self.inc_df = df[self.all_columns]  # .copy(deep=True)
         self.inc_label_df = self.inc_df.copy(deep=True)
         # print("label group counts before:{}".format(self.label_group_counts))
@@ -224,11 +453,6 @@ class TabularDataset(Dataset):
         else:
             self.inc_data = pd.concat([encoded_numeric, encoded_categorical], axis=1)
 
-        # if self.label_column_name is not None:
-        #     self.inc_label = self.inc_data.iloc[:, self.inc_data.columns.str.contains(self.label_column_name)]
-        # else:
-        #     self.inc_label = pd.DataFrame(np.zeros((self.inc_rows, 1)))
-
         self.inc_raw_data = torch.from_numpy(self.inc_data.values.astype("float32")).to(self.device)
         self.inc_raw_label_data = torch.from_numpy(self.inc_label.values.astype("float32")).to(self.device)
 
@@ -236,48 +460,106 @@ class TabularDataset(Dataset):
         self.inc_old_data = pd.concat([self.inc_data, self.data], axis=0)
         self.inc_old_rows = len(self.inc_old_data)
 
-        # if self.label_column_name is not None:
-        #     self.inc_old_label = self.inc_old_data.iloc[:,
-        #                          self.inc_old_data.columns.str.contains(self.label_column_name)]
-        # else:
-        #     self.inc_old_label = pd.DataFrame(np.zeros((self.inc_old_rows, 1)))
-
         self.inc_old_label = pd.concat([self.inc_label, self.label], axis=0)
-
         self.inc_old_raw_data = torch.from_numpy(self.inc_old_data.values.astype("float32")).to(self.device)
         self.inc_old_raw_label_data = torch.from_numpy(self.inc_old_label.values.astype("float32")).to(self.device)
 
-        # ### strategy three:  use sample of incremental data and old data to train (update after, line251-270)
-        # self.inc_sample_data = self.inc_old_data.sample(frac=0.2)
-        # self.inc_sample_rows = len(self.inc_sample_data)
-
-        # # if self.label_column_name is not None:
-        # #     self.inc_sample_label = self.inc_sample_data.iloc[:,
-        # #                             self.inc_sample_data.columns.str.contains(self.label_column_name)]
-        # # else:
-        # #     self.inc_sample_label = pd.DataFrame(np.zeros((self.inc_sample_rows, 1)))
-
-        # # print("=====self.inc_sample_data.index: ", self.inc_sample_data.index)
-        # # print("=====type(self.inc_sample_data.index)", type(self.inc_sample_data.index))
-        # # print("=====self.inc_old_data.index: ", self.inc_old_data.index)
-        # # print("=====type(self.inc_old_data.index)", type(self.inc_old_data.index))
-        # # inc_sample_data_indices = [self.inc_old_data.index.get_loc(idx) for idx in self.inc_sample_data.index]
-        # inc_sample_data_indices = [idx for idx in self.inc_sample_data.index]
-        # self.inc_sample_label = self.inc_old_label.iloc[inc_sample_data_indices, :]
-
-        # self.inc_sample_raw_data = torch.from_numpy(self.inc_sample_data.values.astype("float32")).to(self.device)
-        # self.inc_sample_raw_label_data = torch.from_numpy(self.inc_sample_label.values.astype("float32")).to(
-        #     self.device)
 
         ### strategy three:  use sample of incremental data and old data to train
         self.inc_sample_data = self.inc_old_data.sample(frac=0.2)
+        # if self.label_column_name is not None:        # 这样好像无法处理多个标签属性，换成下面的两行
+        #     self.inc_sample_label = self.inc_sample_data.iloc[:,
+        #                             self.inc_sample_data.columns.str.contains(self.label_column_name)]
+        # else:
+        #     self.inc_sample_label = pd.DataFrame(np.zeros((self.inc_sample_rows, 1)))
+
+        inc_sample_data_indices = [idx for idx in self.inc_sample_data.index]
+        self.inc_sample_label = self.inc_old_label.iloc[inc_sample_data_indices, :]
+        
+        if "left_data" in train_config:         # 存在"left_data"这一项，表示进行数据删除，即 self.delete_data == True
+            left_data_filename = train_config["left_data"]
+            left_data_df = pd.read_csv(left_data_filename, delimiter=delimiter)
+            
+            self.left_df = left_data_df[self.all_columns]  # .copy(deep=True)
+            self.left_label_df = self.left_df.copy(deep=True)
+            self.left_rows = len(df)
+
+            if len(label_columns) > 1:
+                self.left_label_df[self.label_column_name] = self.left_label_df[label_columns].astype(str).agg('-'.join, axis=1)
+            if self.label_column_name != None:
+                # self.inc_label_group_counts = self.inc_label_df[self.label_column_name].value_counts().to_dict()
+                for label in self.inc_label_group_counts:     # self.label_group_counts 应该减去删除的数量
+                    if label in self.label_group_counts:
+                        self.label_group_counts[label] -= self.inc_label_group_counts[label]*2      # 因为前面把inc额外加了一次，所以这里要减去两次
+                    else:
+                        self.label_group_counts[label] = self.inc_label_group_counts[label]
+            encoded_categorical = None
+            encoded_numeric = None
+            if len(self.all_categorical_columns) > 0:
+                categorical_data = self.left_df[self.all_categorical_columns]
+                if self.categorical_encoding == 'binary':
+                    encoded_categorical = self.bce.transform(categorical_data)
+                    self.left_label = self.encode_label_binary(self.left_label_df[[self.label_column_name]])
+                else:
+                    onehot_encoded = self.ohe.transform(categorical_data).todense()
+                    encoded_categorical = pd.DataFrame(onehot_encoded, columns=self.onehot_encoded_columns)
+                    self.left_label = self.encode_label_binary(self.left_label_df[[self.label_column_name]])
+
+            if len(self.numeric_columns) > 0:
+                numeric_data = self.left_df[self.numeric_columns]
+                if self.numeric_encoding == 'gaussian':
+                    encoded_numeric = self.gme.transform(numeric_data)
+                elif self.numeric_encoding == 'stdmm':
+                    numeric_data = np.array(numeric_data)
+                    numeric_data = self.std_scaler.transform(numeric_data)
+                    numeric_data = self.mm_scaler.transform(numeric_data)
+                    encoded_numeric = pd.DataFrame(numeric_data, columns=self.numeric_columns)
+                else:
+                    numeric_data = np.array(numeric_data)
+                    numeric_data = self.mm_scaler.transform(numeric_data)
+                    encoded_numeric = pd.DataFrame(numeric_data, columns=self.numeric_columns)
+
+            if encoded_categorical is None:
+                self.left_data = encoded_numeric
+            elif encoded_numeric is None:
+                self.left_data = encoded_categorical
+            else:
+                self.left_data = pd.concat([encoded_numeric, encoded_categorical], axis=1)
+
+            # self.inc_sample_data = pd.concat([self.inc_data, self.left_data.sample(frac=0.003)], axis=0)    # test1
+            # sampled_left_data = self.left_data.sample(frac=0.2)     # tpch-cn, tpcds-sw
+            sampled_left_data = self.left_data.sample(frac=0.7)
+            # self.inc_sample_data = pd.concat([self.inc_data.head(4000), sampled_left_data], axis=0)    # census2
+            self.inc_sample_data = pd.concat([self.inc_data, sampled_left_data], axis=0)
+
+            sampled_indices = [idx for idx in sampled_left_data.index]
+            sampled_left_label = self.left_label.iloc[sampled_indices, :]
+            # self.inc_sample_label = pd.concat([self.inc_label.head(4000), sampled_left_label], axis=0)  # census2
+            self.inc_sample_label = pd.concat([self.inc_label, sampled_left_label], axis=0)
+
+            # label_group_counts, label_value_mapping, label_group_relative_stds, label_group_relative_stds_sums, total_rows 后面要用到，需要更新
+            # label_group_counts 前面已经更新，label_value_mapping 不用更新
+            self.total_rows = len(self.left_df)
+            self.label_group_stds = {}
+            self.label_group_means = {}
+            self.label_group_relative_stds = {}
+            self.label_group_relative_stds_sums = {}
+            for col in self.numeric_columns:
+                self.label_group_stds[col] = self.left_label_df.groupby(self.label_column_name)[col].std(ddof=0).to_dict()
+                self.label_group_means[col] = self.left_label_df.groupby(self.label_column_name)[col].mean().to_dict()
+                self.label_group_relative_stds[col] = {
+                    k: self.label_group_stds[col][k] / self.label_group_means[col][k] if self.label_group_means[col][k] != 0 else 0
+                    for k in self.label_group_stds[col]}
+                self.label_group_relative_stds_sums[col] = sum(self.label_group_relative_stds[col].values())
+
+    
         self.inc_sample_rows = len(self.inc_sample_data)
 
-        if self.label_column_name is not None:
-            self.inc_sample_label = self.inc_sample_data.iloc[:,
-                                    self.inc_sample_data.columns.str.contains(self.label_column_name)]
-        else:
-            self.inc_sample_label = pd.DataFrame(np.zeros((self.inc_sample_rows, 1)))
+        # if self.label_column_name is not None: 
+        #     self.inc_sample_label = self.inc_sample_data.iloc[:,
+        #                             self.inc_sample_data.columns.str.contains(self.label_column_name)]
+        # else:
+        #     self.inc_sample_label = pd.DataFrame(np.zeros((self.inc_sample_rows, 1)))
 
         self.inc_sample_raw_data = torch.from_numpy(self.inc_sample_data.values.astype("float32")).to(self.device)
         self.inc_sample_raw_label_data = torch.from_numpy(self.inc_sample_label.values.astype("float32")).to(
@@ -422,7 +704,8 @@ class TabularDataset(Dataset):
         bce = BinaryEncoder(cols=[self.label_column_name], label=self.label_column_name)
         binary_encoded = bce.fit_transform(label_data)
         # self.column_digits = self.bce.column_digits
-        if self.label_column_name is not None:
+        # if self.label_column_name is not None:
+        if self.delete_data == False and self.label_column_name is not None:    # 如果是删除数据，不用修改label_value_mapping
             self.label_value_mapping = bce.label_value_mapping
             self.label_mapping_out = bce.mapping[self.label_column_name]
         return binary_encoded
@@ -560,6 +843,12 @@ def generate_dataset_name(train_config):
 def save_dataset(dataset, param, postfix=''):
     dataset_name = dataset.dataset_name  # generate_dataset_name(param)
     dataset_name += postfix
+    if dataset_name.startswith('model_optimize_whole_ssales_mm'):  # 防止文件名过长
+        dataset_name = 'model_optimize_whole_ssales_mm'
+    elif dataset_name.startswith('model_optimize_whole_ssales_test'):  # 防止文件名过长
+        dataset_name = 'model_optimize_whole_ssales_test'
+    elif dataset_name.startswith('model_optimize_whole_ssales'):  # 防止文件名过长
+        dataset_name = 'model_optimize_whole_ssales'
     path = "./saved_datasets/{}".format(dataset_name)
     with open(path, 'wb') as file:
         pickle.dump(dataset, file, True)
@@ -577,6 +866,12 @@ def load_dataset(train_config, postfix=''):
     start_time = time.perf_counter()
     dataset_name = generate_dataset_name(train_config)
     dataset_name += postfix
+    if dataset_name.startswith('model_optimize_whole_ssales_mm'):  # 防止文件名过长
+        dataset_name = 'model_optimize_whole_ssales_mm'
+    elif dataset_name.startswith('model_optimize_whole_ssales_test'):  # 防止文件名过长
+        dataset_name = 'model_optimize_whole_ssales_test'
+    elif dataset_name.startswith('model_optimize_whole_ssales'):  # 防止文件名过长
+        dataset_name = 'model_optimize_whole_ssales'
     logger.info("load existing dataset:{}".format(dataset_name))
     path = "./saved_datasets/{}".format(dataset_name)
     with open(path, 'rb') as file:
@@ -596,6 +891,12 @@ def load_light_dataset(train_config, postfix=''):
     start_time = time.perf_counter()
     dataset_name = generate_dataset_name(train_config)
     dataset_name += postfix
+    if dataset_name.startswith('model_optimize_whole_ssales_mm'):  # 防止文件名过长
+        dataset_name = 'model_optimize_whole_ssales_mm'
+    elif dataset_name.startswith('model_optimize_whole_ssales_test'):  # 防止文件名过长
+        dataset_name = 'model_optimize_whole_ssales_test'
+    elif dataset_name.startswith('model_optimize_whole_ssales'):  # 防止文件名过长
+        dataset_name = 'model_optimize_whole_ssales'
     logger.info("load existing dataset(light):{}".format(dataset_name))
     path = "./saved_datasets/{}_light".format(dataset_name)
     if os.path.isfile(path):
@@ -611,6 +912,12 @@ def load_light_dataset(train_config, postfix=''):
 
 def exist_dataset(train_config):
     model_name = generate_dataset_name(train_config)
+    if model_name.startswith('model_optimize_whole_ssales_mm'):  # 防止文件名过长
+        model_name = 'model_optimize_whole_ssales_mm'
+    elif model_name.startswith('model_optimize_whole_ssales_test'):  # 防止文件名过长
+        model_name = 'model_optimize_whole_ssales_test'
+    elif model_name.startswith('model_optimize_whole_ssales'):  # 防止文件名过长
+        model_name = 'model_optimize_whole_ssales'
     path = "./saved_datasets/{}".format(model_name)
     if os.path.isfile(path):
         return True

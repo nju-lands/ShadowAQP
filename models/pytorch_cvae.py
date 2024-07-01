@@ -197,35 +197,20 @@ def generate_samples(model, dataset, query_config, train_config):
         sample_allocation, sample_rates = advance_senate_sampling(model, dataset, sample_rate)
     elif train_config['sample_method'] == "statistics":
         # sample_allocation, sample_rates = statistics_sampling(model, dataset, sample_rate, query_config)
-        sample_allocation, sample_rates = statistics_sampling_with_small_group(model, dataset, sample_rate,
-                                                                               query_config)
-        # print("sample_allocation before: ", sample_allocation)                                                   
+        sample_allocation, sample_rates = statistics_sampling_with_small_group(model, dataset, sample_rate, query_config)
+        # print("sample_allocation before: ", sample_allocation)  
+    elif train_config['sample_method'] == "statistics multi label":
+        sample_allocation, sample_rates = statistics_sampling_with_multi_label(model, dataset, sample_rate, query_config)   
+    elif train_config['sample_method'] == "statistics model optimize":
+        sample_allocation, sample_rates = statistics_sampling_with_model_optimize(model, dataset, sample_rate, query_config, train_config)                                             
     else:
         sample_allocation, sample_rates = statistics_sampling_with_small_group(model, dataset, sample_rate,
                                                                                query_config)
-    # print("sample_allocation before: ",sample_allocation)
-    # if 'condition' in query_config and len(query_config['condition']):
-    #     logger.info("filtering with condition {}".format(query_config['condition']))
-    #     condition = query_config['condition'][0]
-    #     if '<=' in condition:
-    #         bound_value = int(condition.split('<=')[-1])
-    #         sample_allocation = {k: v for k, v in sample_allocation.items() if k <= bound_value}
-    #     elif '>=' in condition:
-    #         bound_value = int(condition.split('>=')[-1])
-    #         sample_allocation = {k: v for k, v in sample_allocation.items() if k >= bound_value}
-    #     elif '=' in condition:
-    #         bound_value = int(condition.split('=')[-1])
-    #         sample_allocation = {k: v for k, v in sample_allocation.items() if k == bound_value}
-    #     elif '<' in condition:
-    #         bound_value = int(condition.split('<')[-1])
-    #         sample_allocation = {k: v for k, v in sample_allocation.items() if k < bound_value}
-    #     elif '>' in condition:
-    #         bound_value = int(condition.split('>')[-1])
-    #         sample_allocation = {k: v for k, v in sample_allocation.items() if k > bound_value}
+    # print("sample_allocation: ",sample_allocation)
 
     samples = generate_samples_with_allocation(dataset, model, sample_allocation, sample_rates, train_config)
-    # print("sample_allocation after: ", sample_allocation)
-    # print("sample_rates: ", sample_rates)
+    # print("=====sample_allocation after: ", sample_allocation)
+    # print("=====sample_rates: ", sample_rates)
     # print(samples[:10])
 
     # save samples, but bring I/O cost
@@ -332,6 +317,8 @@ def generate_group_samples(sample_count, label, latent_dim, batch_size, model, z
 
         ### param normal
         noise = torch.normal(mean=mean, std=std).to(model.device)
+        # print("======noise.shape: ", noise.shape)
+        # print("======each_label.shape: ", each_label.shape)
         fake = model.decode(noise, each_label)
 
         ### activate output
@@ -373,20 +360,20 @@ def generate_samples_with_allocation(dataset, model, sample_allocation, sample_r
             if categorical_encoding == 'binary':
                 mapping = dataset.label_mapping_out
                 label = [mapping.loc[label_value_idx].values]
+                # print("=====label: ",label)
                 label = torch.from_numpy(np.repeat(label, batch_size, axis=0)).to(model.device)
                 # label = np.tile(label, (sample_count, 1))
             else:
                 label = np.ones((batch_size,)) * label_value_idx
                 label = torch.from_numpy(to_categorical(label, label_size)).to(model.device)
 
-            # thread = threading.Thread(target=generate_group_samples,
-            #                           args=(sample_count, label, latent_dim, batch_size, model, dataset, samples))
-            # threads.append(thread)
-            # thread.start()
+            # print("=====label: ",label)
+            # print("=====sample_count: ",sample_count)
             generate_group_samples(sample_count, label, latent_dim, batch_size, model, z_decoded)
 
     # for t in threads:
     #     t.join()
+
     # print("=====z_decoded: ",z_decoded)
     z_decoded = np.concatenate(z_decoded, axis=0)
     samples_df = dataset.decode_samples(z_decoded)
@@ -394,12 +381,19 @@ def generate_samples_with_allocation(dataset, model, sample_allocation, sample_r
     # print("label_column_name:",dataset.label_column_name)
     # if len(label_columns)>1:
     #     samples_df[dataset.label_column_name]=samples_df[label_columns].astype(str).agg('-'.join, axis=1)
+    # samples_df = samples_df.dropna(subset=['size'])
+    # samples_df['size'] = samples_df['size'].astype(int)
+
+    # for sql59
+    # samples_df['ss_store_sk'] = samples_df['ss_store_sk'].apply(lambda x: np.random.choice(['1.0', '2.0', '4.0', '7.0', '8.0', '10.0']) if x == 'unused label' else x)
+    # samples_df['ss_item_sk'] = samples_df['ss_item_sk'].apply(lambda x: np.random.choice(range(1, 18001)) if x == 'unused label' else x)
+
     samples_df=generate_label_column(samples_df,train_config['label_columns'],train_config['bucket_columns'],dataset.label_column_name)
-    # if dataset.name == 'tpcds-06667g-store':
-    #     print("========samples_df: ", samples_df)
-    # print("======sample_rates: ", sample_rates)
-    # print("======dataset.label_column_name: ", dataset.label_column_name)
     samples_df['{}_rate'.format(dataset.name)] = samples_df[dataset.label_column_name].map(sample_rates)
+
+    # for sql27
+    # samples_df['ss_store_sk'] = samples_df['ss_store_sk'].apply(lambda x: np.random.choice(['1.0', '2.0', '4.0', '7.0', '8.0', '10.0']) if x == 'unused label' else x)
+
     # print("========samples_df: ", samples_df[:50])
     
     # samples_df = pd.concat(samples)
@@ -529,29 +523,226 @@ def statistics_sampling_with_small_group(model, dataset, sample_rate, query_conf
     total_rows = dataset.total_rows
     total_samples = total_rows * sample_rate
 
-    statistics_sampling_samples = total_samples * 0.5
-    # print("========sample_rate: ",sample_rate)
-    # print("========statistics_sampling_samples: ",statistics_sampling_samples)
-    small_group_sampling_samples = total_samples - statistics_sampling_samples
+    # statistics_sampling_samples = total_samples * 0.5
+    statistics_sampling_samples = total_samples * 1.0
+    small_group_sampling_samples = total_samples * 0.3
     small_group_K = small_group_sampling_samples / len(label_group_counts)
 
     sample_allocation = {}
     sample_rates = {}
-    # print("=======label_value_mapping: ", label_value_mapping)
+    if small_group_K < 1:
+        small_group_K = 1
+    # count = 0
+    # print("=====label_value_mapping: ", label_value_mapping)
     for label_value_idx, label_value in label_value_mapping.items():
         group_count = label_group_counts[label_value]
         relative_variances = sum([label_group_relative_stds[col][label_value] for col in numeric_columns])
         sum_relative_variance = sum([label_group_relative_stds_sums[col] for col in numeric_columns])
-        # print("=========label_group_relative_stds_sums: ",label_group_relative_stds_sums)
+        group_sample = int(statistics_sampling_samples * (relative_variances / sum_relative_variance))
+        group_sample += small_group_K
+        # if group_sample < 1:
+        #     group_sample = 1
+        #     count += 1
+        sample_count = group_sample if group_sample < group_count else group_count
+        sample_allocation[label_value] = sample_count
+        if group_count == 0:
+            sample_rates[label_value] = 0.0
+        else:
+            sample_rates[label_value] = sample_count / group_count
+        
+    # print('======count: ', count)
+    print('======small_group_K: ', small_group_K)
+    return sample_allocation, sample_rates
+
+def statistics_sampling_with_multi_label(model, dataset, sample_rate, query_config):
+    model.eval()
+    numeric_columns = list(set(query_config['sum_cols']) & set(query_config['avg_cols']) & set(dataset.numeric_columns))
+
+    label_group_counts = dataset.label_group_counts
+    label_value_mapping = dataset.label_value_mapping
+    multi_label_group_beta = dataset.multi_label_group_beta
+    multi_label_group_beta_sums = dataset.multi_label_group_beta_sums
+
+    total_rows = dataset.total_rows
+    total_samples = total_rows * sample_rate
+
+    small_group_K = int(total_samples * 0.3 / len(label_group_counts))
+    print('======small_group_K: ', small_group_K)
+    statistics_sampling_samples = total_samples #- 132*small_group_K
+
+    sample_allocation = {}
+    sample_rates = {}
+    count = 0
+    for label_value_idx, label_value in label_value_mapping.items():
+        group_count = label_group_counts[label_value]
+        beta = sum([multi_label_group_beta[col][label_value] for col in numeric_columns])
+        sum_beta = sum([multi_label_group_beta_sums[col] for col in numeric_columns])
+        group_sample = int(statistics_sampling_samples * (beta / sum_beta))
+        # group_sample += small_group_K
+        if group_sample < small_group_K:
+            group_sample = small_group_K
+            count += 1
+        sample_count = group_sample if group_sample < group_count else group_count
+        sample_allocation[label_value] = sample_count
+        if group_count == 0:
+            sample_rates[label_value] = 0.0
+        else:
+            sample_rates[label_value] = sample_count / group_count
+        
+    print('======count: ', count)
+    return sample_allocation, sample_rates
+
+def statistics_sampling_with_model_optimize_only_tow_label(model, dataset, sample_rate, query_config, train_config):
+    model.eval()
+    used_label = list(train_config['used_label'])
+    # TODO：暂时只考虑两个属性
+    all_label = [0, 1]
+    unused_label = [i for i in all_label if i not in used_label]
+
+    numeric_columns = list(set(query_config['sum_cols']) & set(query_config['avg_cols']) & set(dataset.numeric_columns))
+
+    label_group_counts = dataset.label_group_counts
+    label_value_mapping = dataset.label_value_mapping
+    label_group_relative_stds = dataset.label_group_relative_stds
+    label_group_relative_stds_sums = dataset.label_group_relative_stds_sums
+
+    # TODO：暂时只考虑两个属性
+    if unused_label[0] == 1:        # 使用第一个属性
+        label_group_counts = dataset.label_group_counts_A
+        label_value_mapping = dataset.label_value_mapping
+        label_group_relative_stds = dataset.label_group_relative_stds_A
+        label_group_relative_stds_sums = dataset.label_group_relative_stds_sums_A
+    elif unused_label[0] == 0:       # 使用第二个属性
+        label_group_counts = dataset.label_group_counts_B
+        label_value_mapping = dataset.label_value_mapping
+        label_group_relative_stds = dataset.label_group_relative_stds_B
+        label_group_relative_stds_sums = dataset.label_group_relative_stds_sums_B
+
+
+    total_rows = dataset.total_rows
+    total_samples = total_rows * sample_rate
+
+    # statistics_sampling_samples = total_samples * 0.5
+    statistics_sampling_samples = total_samples * 1.0
+    small_group_sampling_samples = total_samples * 0.3
+    small_group_K = small_group_sampling_samples / len(label_group_counts)
+
+    sample_allocation = {}
+    sample_rates = {}
+    if small_group_K < 1:
+        small_group_K = 1
+    # print("=====label_value_mapping: ", label_value_mapping)
+    for label_value_idx, label_value in label_value_mapping.items():
+        single_label_values = label_value.split('-')
+        flag = False
+        for unused in unused_label:         # 不相关的属性在查询中应该以 NaN 的形式出现，即label属性应该是 xxx-NaN
+            if single_label_values[unused] != 'unused label':
+                flag = True
+                break
+        if flag:
+            continue
+            
+        # 只有 'xxx-NaN' 形式的 label_value 才能到这里来
+        single_label_value = single_label_values[used_label[0]]  # 将 label_value 从 xxx-NaN 转换为 xxx; TODO：暂时只考虑两个属性
+        group_count = label_group_counts[single_label_value]
+        relative_variances = sum([label_group_relative_stds[col][single_label_value] for col in numeric_columns])
+        sum_relative_variance = sum([label_group_relative_stds_sums[col] for col in numeric_columns])
         group_sample = int(statistics_sampling_samples * (relative_variances / sum_relative_variance))
         group_sample += small_group_K
         sample_count = group_sample if group_sample < group_count else group_count
+        # sample_allocation 和 sample_rates 的 key 还是 'xxx-NaN' 形式
         sample_allocation[label_value] = sample_count
-        sample_rates[label_value] = sample_count / group_count
+        if group_count == 0:
+            sample_rates[label_value] = 0.0
+        else:
+            sample_rates[label_value] = sample_count / group_count
         
-    # print("========sample_rates: ",sample_rates)
+    print('======small_group_K: ', small_group_K)
     return sample_allocation, sample_rates
 
+def statistics_sampling_with_model_optimize(model, dataset, sample_rate, query_config, train_config):
+    model.eval()
+    used_label = list(train_config['used_label'])
+    # print('used_label: ', used_label)
+    # TODO：暂时只考虑四个属性
+    all_label = [0, 1, 2, 3]
+    unused_label = [i for i in all_label if i not in used_label]
+
+    numeric_columns = list(set(query_config['sum_cols']) & set(query_config['avg_cols']) & set(dataset.numeric_columns))
+
+    label_group_counts = dataset.label_group_counts
+    label_value_mapping = dataset.label_value_mapping
+    label_group_relative_stds = dataset.label_group_relative_stds
+    label_group_relative_stds_sums = dataset.label_group_relative_stds_sums
+
+    # TODO：暂时只考虑四个属性
+    if len(used_label)==2 and used_label[0] == 0 and used_label[1] == 3:       # 使用第一、四个属性
+        label_group_counts = dataset.label_group_counts_E
+        label_group_relative_stds = dataset.label_group_relative_stds
+        label_group_relative_stds_sums = dataset.label_group_relative_stds_sums
+    elif used_label[0] == 0:        # 使用第一个属性
+        label_group_counts = dataset.label_group_counts_A
+        label_group_relative_stds = dataset.label_group_relative_stds_A
+        label_group_relative_stds_sums = dataset.label_group_relative_stds_sums_A
+    elif used_label[0] == 1:       # 使用第二个属性
+        label_group_counts = dataset.label_group_counts_B
+        label_group_relative_stds = dataset.label_group_relative_stds_B
+        label_group_relative_stds_sums = dataset.label_group_relative_stds_sums_B
+    elif used_label[0] == 2:       # 使用第三个属性
+        label_group_counts = dataset.label_group_counts_C
+        label_group_relative_stds = dataset.label_group_relative_stds_C
+        label_group_relative_stds_sums = dataset.label_group_relative_stds_sums_C
+    elif used_label[0] == 3:       # 使用第四个属性
+        label_group_counts = dataset.label_group_counts_D
+        label_group_relative_stds = dataset.label_group_relative_stds_D
+        label_group_relative_stds_sums = dataset.label_group_relative_stds_sums_D
+
+
+    total_rows = dataset.total_rows
+    total_samples = total_rows * sample_rate
+
+    # statistics_sampling_samples = total_samples * 0.5
+    statistics_sampling_samples = total_samples * 1.0
+    small_group_sampling_samples = total_samples * 0.3
+    small_group_K = small_group_sampling_samples / len(label_group_counts)
+
+    sample_allocation = {}
+    sample_rates = {}
+    small_group_K += 1
+    # if small_group_K < 1:
+    #     small_group_K = 1
+    # print("=====label_value_mapping: ", label_value_mapping)
+    for label_value_idx, label_value in label_value_mapping.items():
+        single_label_values = label_value.split('-')
+        flag = False
+        for unused in unused_label:         # 不相关的属性在查询中应该以 NaN 的形式出现，即label属性应该是 xxx-NaN
+            if single_label_values[unused] != 'unused label':
+                flag = True
+                break
+        if flag:
+            continue
+            
+        # 只有 'xxx-NaN' 形式的 label_value 才能到这里来
+        single_label_value = single_label_values[used_label[0]]  # 将 label_value 从 xxx-NaN 转换为 xxx; TODO：暂时只考虑四个属性
+        if len(used_label) == 2:
+            if single_label_values[used_label[0]] == 'unused label' or single_label_values[used_label[1]] == 'unused label':    # 如果有两个label属性，那么都不能为'unused label'
+                continue
+            single_label_value = "-".join([single_label_values[used_label[0]], single_label_values[used_label[1]]])   # for sql59
+        group_count = label_group_counts[single_label_value]
+        relative_variances = sum([label_group_relative_stds[col][single_label_value] for col in numeric_columns])
+        sum_relative_variance = sum([label_group_relative_stds_sums[col] for col in numeric_columns])
+        group_sample = int(statistics_sampling_samples * (relative_variances / sum_relative_variance))
+        group_sample += small_group_K
+        sample_count = group_sample if group_sample < group_count else group_count
+        # sample_allocation 和 sample_rates 的 key 还是 'xxx-NaN' 形式
+        sample_allocation[label_value] = sample_count
+        if group_count == 0:
+            sample_rates[label_value] = 0.0
+        else:
+            sample_rates[label_value] = sample_count / group_count
+        
+    print('======small_group_K: ', small_group_K)
+    return sample_allocation, sample_rates
 
 def save_samples(samples, train_config):
     samples_name = "{}_{}_{}_ld{}_id{}_bs{}_ep{}_rate{}_{}_{}.csv".format(train_config["model_type"], train_config["name"],
